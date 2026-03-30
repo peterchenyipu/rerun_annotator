@@ -1,0 +1,6 @@
+[submodule "gradio-rerun-viewer"]
+	path = gradio-rerun-viewer
+	url = git@github.com:peterchenyipu/gradio-rerun-viewer.git
+[submodule "annotation-example"]
+	path = annotation-example
+	url = git@github.com:peterchenyipu/annotation-example.git
