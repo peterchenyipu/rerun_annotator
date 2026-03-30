@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -377,6 +378,8 @@ def _log_video_feature(
     episode: EpisodeRecord,
     row_lookup: dict[int, int],
 ) -> None:
+    feature = source.info.get("features", {}).get(feature_key, {})
+    output_fps = _resolve_video_output_fps(feature, source.video_shards.get(feature_key, []))
     for shard_index, shard in enumerate(source.video_shards.get(feature_key, [])):
         overlap_start = max(shard.global_index_start, episode.global_index_start)
         overlap_end = min(shard.global_index_end, episode.global_index_end)
@@ -385,7 +388,7 @@ def _log_video_feature(
 
         local_start = overlap_start - shard.global_index_start
         local_end = overlap_end - shard.global_index_start
-        clip_path = _create_temp_video_clip(shard.path, local_start, local_end)
+        clip_path = _create_temp_video_clip(shard.path, local_start, local_end, output_fps=output_fps)
         try:
             asset = rr.AssetVideo(contents=clip_path.read_bytes(), media_type="video/mp4")
             frame_timestamps_ns = asset.read_frame_timestamps_nanos()
@@ -516,13 +519,63 @@ def _probe_video_stream(video_path: Path) -> dict[str, Any] | None:
     return streams[0]
 
 
-def _create_temp_video_clip(video_path: Path, local_start: int, local_end: int) -> Path:
+def _resolve_video_output_fps(feature: Any, shards: list[VideoShard]) -> float | None:
+    if isinstance(feature, dict):
+        info = feature.get("info")
+        if isinstance(info, dict):
+            fps_value = info.get("video.fps")
+            if fps_value is not None:
+                try:
+                    fps = float(fps_value)
+                except (TypeError, ValueError):
+                    fps = 0.0
+                if fps > 0:
+                    return fps
+
+    for shard in shards:
+        probe = _probe_video_stream(shard.path)
+        if probe is None:
+            continue
+
+        fps = _parse_frame_rate(probe.get("avg_frame_rate")) or _parse_frame_rate(probe.get("r_frame_rate"))
+        if fps is not None:
+            return fps
+
+    return None
+
+
+def _parse_frame_rate(value: Any) -> float | None:
+    if value in {None, "", "0/0"}:
+        return None
+
+    try:
+        fps = float(Fraction(str(value)))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+    if fps <= 0:
+        return None
+    return fps
+
+
+def _create_temp_video_clip(
+    video_path: Path,
+    local_start: int,
+    local_end: int,
+    *,
+    output_fps: float | None,
+) -> Path:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise ValueError(f"ffmpeg is required to materialize video clips from `{video_path}`.")
 
     with tempfile.NamedTemporaryFile(prefix="rerun_lerobot_clip_", suffix=".mp4", delete=False) as handle:
         clip_path = Path(handle.name)
+
+    video_filters = [f"trim=start_frame={local_start}:end_frame={local_end + 1}", "setpts=PTS-STARTPTS"]
+    if output_fps is not None:
+        video_filters.append(f"fps={output_fps:g}")
+
     command = [
         ffmpeg_path,
         "-loglevel",
@@ -531,7 +584,7 @@ def _create_temp_video_clip(video_path: Path, local_start: int, local_end: int) 
         "-i",
         str(video_path),
         "-vf",
-        f"trim=start_frame={local_start}:end_frame={local_end + 1},setpts=PTS-STARTPTS",
+        ",".join(video_filters),
         "-an",
         "-c:v",
         "libx264",
