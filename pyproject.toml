@@ -1,0 +1,11 @@
+[project]
+name = "rerun-annotator"
+version = "0.1.0"
+description = "annotation tool for rerun"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "gradio==6.5.1",
+    "gradio-rerun==0.29.2",
+    "rerun-sdk==0.29.2",
+]
