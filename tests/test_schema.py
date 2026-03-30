@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from rerun import recording
 
@@ -13,7 +14,10 @@ from rerun_annotator.schema import (
     ANNOTATION_SUMMARY_ENTITY,
     SegmentAnnotation,
     build_annotated_rrd_path,
+    build_output_rrd_path,
     build_summary_markdown,
+    cleanup_temp_rrd,
+    materialize_source_recording,
     save_annotated_rrd,
     validate_segments,
 )
@@ -56,6 +60,37 @@ class SegmentSchemaTests(unittest.TestCase):
         self.assertIn("Trajectory Segments", summary)
         self.assertIn("reach", summary)
         self.assertIn("success", summary)
+
+    def test_build_output_rrd_path_uses_rrd_suffix_for_directory_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_dir = Path(tmpdir) / "lerobot_episode"
+            dataset_dir.mkdir()
+
+            output_path = build_output_rrd_path(dataset_dir)
+
+            self.assertEqual(output_path, dataset_dir.parent / "lerobot_episode.annotated.rrd")
+
+    def test_build_output_rrd_path_uses_rrd_suffix_for_non_rrd_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = Path(tmpdir) / "episode.mp4"
+            video_path.write_bytes(b"demo")
+
+            output_path = build_output_rrd_path(video_path)
+
+            self.assertEqual(output_path, video_path.parent / "episode.annotated.rrd")
+
+    def test_materialize_source_recording_uses_rerun_loader_for_directory_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_dir = Path(tmpdir) / "lerobot_episode"
+            dataset_dir.mkdir()
+
+            fake_stream = mock.Mock()
+            with mock.patch("rerun_annotator.schema.rr.RecordingStream", return_value=fake_stream):
+                materialized = materialize_source_recording(dataset_dir)
+
+            self.assertTrue(materialized.exists())
+            self.assertEqual(fake_stream.log_file_from_path.call_args.args[0], dataset_dir)
+            cleanup_temp_rrd(materialized)
 
     def test_save_annotated_rrd_writes_embedded_columns(self) -> None:
         example_rrd = Path("gradio-rerun-viewer/examples/rrt-star.rrd").resolve()

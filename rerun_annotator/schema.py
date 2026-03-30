@@ -46,6 +46,14 @@ def build_annotated_rrd_path(source_rrd: Path) -> Path:
     return source_rrd.with_name(f"{source_rrd.stem}.annotated{source_rrd.suffix}")
 
 
+def build_output_rrd_path(source_path: Path) -> Path:
+    if source_path.is_dir():
+        return source_path.parent / f"{source_path.name}.annotated.rrd"
+    if source_path.suffix.lower() != ".rrd":
+        return source_path.parent / f"{source_path.stem}.annotated.rrd"
+    return build_annotated_rrd_path(source_path)
+
+
 def renumber_segments(segments: Sequence[SegmentAnnotation]) -> list[SegmentAnnotation]:
     return [replace(segment, segment_id=index) for index, segment in enumerate(segments, start=1)]
 
@@ -266,22 +274,58 @@ def ensure_source_can_be_annotated(source_rrd: Path) -> None:
         )
 
 
+def create_materialized_source_path() -> Path:
+    with tempfile.NamedTemporaryFile(prefix="rerun_materialized_source_", suffix=".rrd", delete=False) as handle:
+        return Path(handle.name)
+
+
 def create_preview_path() -> Path:
     with tempfile.NamedTemporaryFile(prefix="rerun_segment_preview_", suffix=".rrd", delete=False) as handle:
         return Path(handle.name)
 
 
-def cleanup_preview_file(preview_path: str | Path | None) -> None:
-    if preview_path is None:
+def cleanup_temp_rrd(path_like: str | Path | None) -> None:
+    if path_like is None:
         return
 
-    path = Path(preview_path)
-    if path.exists():
+    path = Path(path_like)
+    if path.exists() and path.name.startswith(("rerun_segment_preview_", "rerun_materialized_source_")):
         path.unlink()
 
 
-def save_annotated_rrd(source_rrd: Path, segments: Sequence[SegmentAnnotation]) -> Path:
-    output_path = build_annotated_rrd_path(source_rrd)
+def cleanup_preview_file(preview_path: str | Path | None) -> None:
+    cleanup_temp_rrd(preview_path)
+
+
+def materialize_source_recording(source_path: Path, previous_materialized: str | Path | None = None) -> Path:
+    if source_path.is_file() and source_path.suffix.lower() == ".rrd":
+        ensure_source_can_be_annotated(source_path)
+        cleanup_temp_rrd(previous_materialized)
+        return source_path
+
+    if not source_path.exists():
+        raise ValueError(f"Source path does not exist: {source_path}")
+
+    materialized_path = create_materialized_source_path()
+    try:
+        rec = rr.RecordingStream(application_id="rerun_segment_source_materializer")
+        rec.save(materialized_path)
+        rec.log_file_from_path(source_path)
+        rec.flush()
+    except Exception:
+        cleanup_temp_rrd(materialized_path)
+        raise
+
+    cleanup_temp_rrd(previous_materialized)
+    return materialized_path
+
+
+def save_annotated_rrd(
+    source_rrd: Path,
+    segments: Sequence[SegmentAnnotation],
+    output_path: Path | None = None,
+) -> Path:
+    output_path = output_path or build_annotated_rrd_path(source_rrd)
     _write_annotated_rrd(source_rrd, segments, output_path)
     return output_path
 

@@ -1763,6 +1763,8 @@ source = { virtual = "." }
 dependencies = [
     { name = "gradio" },
     { name = "gradio-rerun" },
+    { name = "opencv-python" },
+    { name = "pyarrow" },
     { name = "rerun-sdk" },
 ]
 
@@ -1770,6 +1772,8 @@ dependencies = [
 requires-dist = [
     { name = "gradio", specifier = "==6.5.1" },
     { name = "gradio-rerun", specifier = "==0.29.2" },
+    { name = "opencv-python", specifier = "==4.13.0.92" },
+    { name = "pyarrow", specifier = "==23.0.1" },
     { name = "rerun-sdk", specifier = "==0.29.2" },
 ]
 

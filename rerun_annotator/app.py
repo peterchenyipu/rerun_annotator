@@ -8,13 +8,25 @@ import gradio as gr
 from gradio_rerun import Rerun
 from gradio_rerun.events import TimelineChange, TimeUpdate
 
+from rerun_annotator.lerobot import (
+    LeRobotDatasetSource,
+    NativeRrdSource,
+    ResolvedSource,
+    build_lerobot_manifest_path,
+    build_lerobot_output_rrd_path,
+    episode_selector_choices,
+    materialize_lerobot_episode,
+    render_source_summary_markdown,
+    resolve_source,
+    update_lerobot_annotation_manifest,
+)
 from rerun_annotator.schema import (
     SegmentAnnotation,
     boundary_table_rows,
     build_segment_annotation,
     build_summary_markdown,
     cleanup_preview_file,
-    ensure_source_can_be_annotated,
+    cleanup_temp_rrd,
     renumber_segments,
     save_annotated_rrd,
     segment_selector_choices,
@@ -35,15 +47,27 @@ def render_cursor_markdown(current_timeline: str, current_time: float) -> str:
 
 
 def render_status_markdown(
-    source_rrd: str | None,
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
     segments: Sequence[SegmentAnnotation],
     warnings: Sequence[str],
     message: str,
+    *,
+    manifest_path: str | None = None,
 ) -> str:
     lines = ["### Status"]
-    if source_rrd:
-        lines.append(f"- Recording: `{source_rrd}`")
+    if isinstance(source, NativeRrdSource):
+        lines.append(f"- Source: `{source.path}`")
+    elif isinstance(source, LeRobotDatasetSource):
+        lines.append(f"- Dataset: `{source.dataset_path}`")
+        if selected_episode is not None:
+            lines.append(f"- Episode: `{selected_episode}`")
+    if base_rrd:
+        lines.append(f"- Materialized Base: `{base_rrd}`")
     lines.append(f"- Segments: `{len(segments)}`")
+    if manifest_path:
+        lines.append(f"- Manifest: `{manifest_path}`")
     if message:
         lines.append(f"- Message: {message}")
     if warnings:
@@ -71,6 +95,12 @@ def build_selector_update(segments: Sequence[SegmentAnnotation]):
         choices=segment_selector_choices(segments),
         value=None,
     )
+
+
+def build_episode_update(source: ResolvedSource | None):
+    if isinstance(source, LeRobotDatasetSource):
+        return gr.update(choices=episode_selector_choices(source), value=None)
+    return gr.update(choices=[], value=None)
 
 
 def build_example_path() -> str:
@@ -122,39 +152,105 @@ def pin_start_to_last_end(
     return last_segment.timeline, last_segment.end_time
 
 
-def load_rrd(
-    source_rrd_input: str,
+def load_source(
+    source_path_input: str,
     previous_preview_rrd: str | None,
-) -> tuple[
-    str,
-    str,
-    str,
-    list[SegmentAnnotation],
-    str,
-    float,
-    str,
-    list[list[str | int | float]],
-    list[list[str | int | float]],
-    str,
-    str,
-    object,
-    str,
-    None,
-    None,
-    str,
-    str,
-    gr.Button,
-    str,
-]:
-    source_rrd = Path(source_rrd_input).expanduser().resolve()
-    ensure_source_can_be_annotated(source_rrd)
+    previous_base_rrd: str | None,
+):
+    if not source_path_input.strip():
+        raise gr.Error("Enter a source path before loading.")
 
-    preview_rrd = write_preview_rrd(source_rrd, [], previous_preview_rrd)
+    source = resolve_source(Path(source_path_input).expanduser().resolve())
+    warnings: list[str] = []
+    cleanup_preview_file(previous_preview_rrd)
+    cleanup_temp_rrd(previous_base_rrd)
+
+    if isinstance(source, NativeRrdSource):
+        preview_rrd = write_preview_rrd(source.path, [], None)
+        return (
+            str(preview_rrd),
+            source,
+            None,
+            str(source.path),
+            str(preview_rrd),
+            [],
+            "",
+            0.0,
+            render_cursor_markdown("", 0.0),
+            render_source_summary_markdown(source),
+            gr.update(visible=False),
+            build_episode_update(None),
+            segment_table_rows([]),
+            boundary_table_rows([]),
+            build_summary_markdown([], warnings),
+            render_status_markdown(
+                source,
+                None,
+                str(source.path),
+                [],
+                warnings,
+                "Loaded recording. Use the viewer cursor to mark the first segment.",
+            ),
+            build_selector_update([]),
+            *clear_segment_form(),
+            gr.update(interactive=False),
+            "",
+            "",
+        )
+
+    return (
+        None,
+        source,
+        None,
+        None,
+        None,
+        [],
+        "",
+        0.0,
+        render_cursor_markdown("", 0.0),
+        render_source_summary_markdown(source),
+        gr.update(visible=True),
+        build_episode_update(source),
+        segment_table_rows([]),
+        boundary_table_rows([]),
+        build_summary_markdown([], warnings),
+        render_status_markdown(
+            source,
+            None,
+            None,
+            [],
+            warnings,
+            "Loaded LeRobot dataset. Select an episode and click Load Episode.",
+            manifest_path=str(build_lerobot_manifest_path(source.dataset_path)),
+        ),
+        build_selector_update([]),
+        *clear_segment_form(),
+        gr.update(interactive=False),
+        "",
+        str(build_lerobot_manifest_path(source.dataset_path)),
+    )
+
+
+def load_episode(
+    source: ResolvedSource | None,
+    selected_episode_input: str | None,
+    previous_preview_rrd: str | None,
+    previous_base_rrd: str | None,
+):
+    if not isinstance(source, LeRobotDatasetSource):
+        raise gr.Error("Load a LeRobot dataset before trying to load an episode.")
+    if not selected_episode_input:
+        raise gr.Error("Choose an episode before loading it.")
+
+    selected_episode = int(selected_episode_input)
+    base_rrd = materialize_lerobot_episode(source, selected_episode, previous_base_rrd)
+    preview_rrd = write_preview_rrd(base_rrd, [], previous_preview_rrd)
     warnings: list[str] = []
 
     return (
         str(preview_rrd),
-        str(source_rrd),
+        selected_episode,
+        str(base_rrd),
         str(preview_rrd),
         [],
         "",
@@ -164,62 +260,63 @@ def load_rrd(
         boundary_table_rows([]),
         build_summary_markdown([], warnings),
         render_status_markdown(
-            str(source_rrd),
+            source,
+            selected_episode,
+            str(base_rrd),
             [],
             warnings,
-            "Loaded recording. Use the viewer cursor to mark the first segment.",
+            f"Loaded LeRobot episode #{selected_episode}. Use the viewer cursor to mark the first segment.",
+            manifest_path=str(build_lerobot_manifest_path(source.dataset_path)),
         ),
         build_selector_update([]),
         *clear_segment_form(),
         gr.update(interactive=False),
-        "",
+        str(build_lerobot_output_rrd_path(source.dataset_path, selected_episode)),
+        str(build_lerobot_manifest_path(source.dataset_path)),
     )
 
 
 def refresh_annotation_state(
-    source_rrd: str,
+    source: ResolvedSource,
+    selected_episode: int | None,
+    base_rrd: str,
     previous_preview_rrd: str | None,
     segments: Sequence[SegmentAnnotation],
     message: str,
     *,
     form_values: tuple[str, float | None, float | None, str, str] | None = None,
-) -> tuple[
-    str,
-    str,
-    list[SegmentAnnotation],
-    list[list[str | int | float]],
-    list[list[str | int | float]],
-    str,
-    str,
-    object,
-    str,
-    None,
-    None,
-    str,
-    str,
-    gr.Button,
-]:
+):
     warnings = validate_segments(segments)
-    preview_rrd = write_preview_rrd(Path(source_rrd), segments, previous_preview_rrd)
-    normalized_segments = list(segments)
+    preview_rrd = write_preview_rrd(Path(base_rrd), segments, previous_preview_rrd)
     next_form_values = clear_segment_form() if form_values is None else form_values
+    manifest_path = str(build_lerobot_manifest_path(source.dataset_path)) if isinstance(source, LeRobotDatasetSource) else ""
 
     return (
         str(preview_rrd),
         str(preview_rrd),
-        normalized_segments,
-        segment_table_rows(normalized_segments),
-        boundary_table_rows(normalized_segments),
-        build_summary_markdown(normalized_segments, warnings),
-        render_status_markdown(source_rrd, normalized_segments, warnings, message),
-        build_selector_update(normalized_segments),
+        list(segments),
+        segment_table_rows(segments),
+        boundary_table_rows(segments),
+        build_summary_markdown(segments, warnings),
+        render_status_markdown(
+            source,
+            selected_episode,
+            base_rrd,
+            segments,
+            warnings,
+            message,
+            manifest_path=manifest_path or None,
+        ),
+        build_selector_update(segments),
         *next_form_values,
-        gr.update(interactive=bool(normalized_segments)),
+        gr.update(interactive=bool(segments)),
     )
 
 
 def add_segment(
-    source_rrd: str | None,
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
     previous_preview_rrd: str | None,
     segments: list[SegmentAnnotation],
     segment_timeline: str,
@@ -227,24 +324,9 @@ def add_segment(
     end_time: float | None,
     subtask: str,
     outcome: str,
-) -> tuple[
-    str,
-    str,
-    list[SegmentAnnotation],
-    list[list[str | int | float]],
-    list[list[str | int | float]],
-    str,
-    str,
-    object,
-    str,
-    None,
-    None,
-    str,
-    str,
-    gr.Button,
-]:
-    if not source_rrd:
-        raise gr.Error("Load an RRD file before adding segments.")
+):
+    if source is None or not base_rrd:
+        raise gr.Error("Load a source recording before adding segments.")
 
     candidate = build_segment_annotation(
         segment_id=len(segments) + 1,
@@ -256,7 +338,9 @@ def add_segment(
     )
     updated_segments = renumber_segments([*segments, candidate])
     return refresh_annotation_state(
-        source_rrd,
+        source,
+        selected_episode,
+        base_rrd,
         previous_preview_rrd,
         updated_segments,
         f"Added segment #{updated_segments[-1].segment_id}.",
@@ -286,7 +370,9 @@ def load_segment_into_form(
 
 
 def update_segment(
-    source_rrd: str | None,
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
     previous_preview_rrd: str | None,
     selected_segment_id: str | None,
     segments: list[SegmentAnnotation],
@@ -295,24 +381,9 @@ def update_segment(
     end_time: float | None,
     subtask: str,
     outcome: str,
-) -> tuple[
-    str,
-    str,
-    list[SegmentAnnotation],
-    list[list[str | int | float]],
-    list[list[str | int | float]],
-    str,
-    str,
-    object,
-    str,
-    None,
-    None,
-    str,
-    str,
-    gr.Button,
-]:
-    if not source_rrd:
-        raise gr.Error("Load an RRD file before updating segments.")
+):
+    if source is None or not base_rrd:
+        raise gr.Error("Load a source recording before updating segments.")
     if not selected_segment_id:
         raise gr.Error("Choose a segment to update.")
 
@@ -340,7 +411,9 @@ def update_segment(
 
     updated_segments = renumber_segments(updated_segments)
     return refresh_annotation_state(
-        source_rrd,
+        source,
+        selected_episode,
+        base_rrd,
         previous_preview_rrd,
         updated_segments,
         f"Updated segment #{selected_id}.",
@@ -348,28 +421,15 @@ def update_segment(
 
 
 def delete_segment(
-    source_rrd: str | None,
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
     previous_preview_rrd: str | None,
     selected_segment_id: str | None,
     segments: list[SegmentAnnotation],
-) -> tuple[
-    str,
-    str,
-    list[SegmentAnnotation],
-    list[list[str | int | float]],
-    list[list[str | int | float]],
-    str,
-    str,
-    object,
-    str,
-    None,
-    None,
-    str,
-    str,
-    gr.Button,
-]:
-    if not source_rrd:
-        raise gr.Error("Load an RRD file before deleting segments.")
+):
+    if source is None or not base_rrd:
+        raise gr.Error("Load a source recording before deleting segments.")
     if not selected_segment_id:
         raise gr.Error("Choose a segment to delete.")
 
@@ -380,35 +440,62 @@ def delete_segment(
 
     updated_segments = renumber_segments(remaining_segments)
     return refresh_annotation_state(
-        source_rrd,
+        source,
+        selected_episode,
+        base_rrd,
         previous_preview_rrd,
         updated_segments,
         f"Deleted segment #{selected_id}.",
     )
 
 
-def save_segments(source_rrd: str | None, segments: Sequence[SegmentAnnotation]) -> tuple[str, str]:
-    if not source_rrd:
-        raise gr.Error("Load an RRD file before saving.")
+def save_segments(
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
+    segments: Sequence[SegmentAnnotation],
+) -> tuple[str, str, str]:
+    if source is None or not base_rrd:
+        raise gr.Error("Load a source recording before saving.")
     if not segments:
         raise gr.Error("Add at least one segment before saving.")
 
-    output_path = save_annotated_rrd(Path(source_rrd), segments)
     warnings = validate_segments(segments)
+    if isinstance(source, NativeRrdSource):
+        output_path = save_annotated_rrd(source.path, segments)
+        manifest_path = ""
+    else:
+        if selected_episode is None:
+            raise gr.Error("Load a LeRobot episode before saving annotations.")
+        output_path = save_annotated_rrd(
+            Path(base_rrd),
+            segments,
+            output_path=build_lerobot_output_rrd_path(source.dataset_path, selected_episode),
+        )
+        manifest_path = str(
+            update_lerobot_annotation_manifest(source, selected_episode, output_path, list(segments))
+        )
+
     return (
         render_status_markdown(
-            source_rrd,
+            source,
+            selected_episode,
+            base_rrd,
             segments,
             warnings,
             f"Saved annotated recording to `{output_path}`.",
+            manifest_path=manifest_path or None,
         ),
         str(output_path),
+        manifest_path,
     )
 
 
 def build_demo() -> gr.Blocks:
     with gr.Blocks(title="Embedded RRD Segment Annotator") as demo:
-        source_rrd_state = gr.State(None)
+        source_state = gr.State(None)
+        selected_episode_state = gr.State(None)
+        base_rrd_state = gr.State(None, delete_callback=cleanup_temp_rrd)
         preview_rrd_state = gr.State(None, delete_callback=cleanup_preview_file)
         segments_state = gr.State([])
         current_timeline_state = gr.State("")
@@ -417,18 +504,19 @@ def build_demo() -> gr.Blocks:
         gr.Markdown(
             """
             # Embedded RRD Segment Annotator
-            Load one `.rrd`, scrub the embedded viewer, mark segment boundaries, assign a free-text subtask, set
-            `success` or `fail`, and save a sibling annotated recording with embedded annotation entities.
+            Load a source `.rrd` or a LeRobot dataset directory, scrub the embedded viewer, mark segment boundaries,
+            assign a free-text subtask, set `success` or `fail`, and save an annotated `.rrd` with embedded
+            annotation entities.
             """
         )
 
         with gr.Row():
-            source_rrd_input = gr.Textbox(
-                label="Source RRD Path",
+            source_path_input = gr.Textbox(
+                label="Source Path",
                 value=build_example_path(),
-                placeholder="/absolute/path/to/episode.rrd",
+                placeholder="/absolute/path/to/episode.rrd or /absolute/path/to/lerobot_dataset",
             )
-            load_button = gr.Button("Load RRD", variant="primary")
+            load_button = gr.Button("Load Source", variant="primary")
 
         with gr.Row():
             with gr.Column(scale=5):
@@ -442,6 +530,17 @@ def build_demo() -> gr.Blocks:
                     height=820,
                 )
             with gr.Column(scale=4):
+                source_summary_md = gr.Markdown("### Source Summary\n_No source loaded yet._")
+                with gr.Group(visible=False) as episode_group:
+                    gr.Markdown("### LeRobot Episode")
+                    episode_selector = gr.Dropdown(
+                        choices=[],
+                        value=None,
+                        label="Episode",
+                        allow_custom_value=False,
+                    )
+                    load_episode_button = gr.Button("Load Episode")
+
                 cursor_md = gr.Markdown(render_cursor_markdown("", 0.0))
                 status_md = gr.Markdown("### Status\n- Segments: `0`")
                 summary_md = gr.Markdown(build_summary_markdown([], []))
@@ -496,6 +595,7 @@ def build_demo() -> gr.Blocks:
                     gr.Markdown("### Save")
                     save_button = gr.Button("Save Annotated RRD", interactive=False)
                     save_path = gr.Textbox(label="Annotated Output", interactive=False)
+                    manifest_path = gr.Textbox(label="Manifest Output", interactive=False)
 
         viewer.time_update(
             track_current_time,
@@ -508,11 +608,44 @@ def build_demo() -> gr.Blocks:
         )
 
         load_button.click(
-            load_rrd,
-            inputs=[source_rrd_input, preview_rrd_state],
+            load_source,
+            inputs=[source_path_input, preview_rrd_state, base_rrd_state],
             outputs=[
                 viewer,
-                source_rrd_state,
+                source_state,
+                selected_episode_state,
+                base_rrd_state,
+                preview_rrd_state,
+                segments_state,
+                current_timeline_state,
+                current_time_state,
+                cursor_md,
+                source_summary_md,
+                episode_group,
+                episode_selector,
+                segment_table,
+                boundary_table,
+                summary_md,
+                status_md,
+                selector,
+                segment_timeline,
+                start_time,
+                end_time,
+                subtask,
+                outcome,
+                save_button,
+                save_path,
+                manifest_path,
+            ],
+        )
+
+        load_episode_button.click(
+            load_episode,
+            inputs=[source_state, episode_selector, preview_rrd_state, base_rrd_state],
+            outputs=[
+                viewer,
+                selected_episode_state,
+                base_rrd_state,
                 preview_rrd_state,
                 segments_state,
                 current_timeline_state,
@@ -530,6 +663,7 @@ def build_demo() -> gr.Blocks:
                 outcome,
                 save_button,
                 save_path,
+                manifest_path,
             ],
         )
 
@@ -561,7 +695,9 @@ def build_demo() -> gr.Blocks:
         add_button.click(
             add_segment,
             inputs=[
-                source_rrd_state,
+                source_state,
+                selected_episode_state,
+                base_rrd_state,
                 preview_rrd_state,
                 segments_state,
                 segment_timeline,
@@ -590,7 +726,9 @@ def build_demo() -> gr.Blocks:
         update_button.click(
             update_segment,
             inputs=[
-                source_rrd_state,
+                source_state,
+                selected_episode_state,
+                base_rrd_state,
                 preview_rrd_state,
                 selector,
                 segments_state,
@@ -619,7 +757,7 @@ def build_demo() -> gr.Blocks:
         )
         delete_button.click(
             delete_segment,
-            inputs=[source_rrd_state, preview_rrd_state, selector, segments_state],
+            inputs=[source_state, selected_episode_state, base_rrd_state, preview_rrd_state, selector, segments_state],
             outputs=[
                 viewer,
                 preview_rrd_state,
@@ -639,8 +777,8 @@ def build_demo() -> gr.Blocks:
         )
         save_button.click(
             save_segments,
-            inputs=[source_rrd_state, segments_state],
-            outputs=[status_md, save_path],
+            inputs=[source_state, selected_episode_state, base_rrd_state, segments_state],
+            outputs=[status_md, save_path, manifest_path],
         )
 
     return demo
@@ -648,7 +786,7 @@ def build_demo() -> gr.Blocks:
 
 def main() -> None:
     demo = build_demo()
-    allowed_paths = [str(Path.cwd()), tempfile.gettempdir()]
+    allowed_paths = [str(Path.cwd()), tempfile.gettempdir(), "/home/peteop/Desktop"]
     demo.queue().launch(allowed_paths=allowed_paths)
 
 
