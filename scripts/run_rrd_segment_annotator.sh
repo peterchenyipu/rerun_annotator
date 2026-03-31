@@ -5,4 +5,4 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "${ROOT_DIR}"
-uv run -m rerun_annotator "$@"
+uv run python -m rerun_annotator "$@"

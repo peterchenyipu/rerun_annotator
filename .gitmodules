@@ -4,3 +4,6 @@
 [submodule "annotation-example"]
 	path = annotation-example
 	url = git@github.com:peterchenyipu/annotation-example.git
+[submodule "lerobot"]
+	path = lerobot
+	url = git@github.com:peterchenyipu/lerobot.git

@@ -3,11 +3,17 @@ name = "rerun-annotator"
 version = "0.1.0"
 description = "annotation tool for rerun"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "gradio==6.5.1",
     "gradio-rerun==0.29.2",
+    "lerobot==0.5.1",
     "opencv-python==4.13.0.92",
     "pyarrow==23.0.1",
+    "rerun_export",
     "rerun-sdk==0.29.2",
 ]
+
+[tool.uv.sources]
+lerobot = { path = "lerobot", editable = true }
+rerun_export = { path = "rerun_export", editable = true }

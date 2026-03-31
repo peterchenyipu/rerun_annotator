@@ -1,5 +1,12 @@
 # Rerun Annotator
 
+This repo now expects Python 3.12 and a checked-out local `lerobot/` fork submodule.
+
+```bash
+git submodule update --init --recursive
+uv sync
+```
+
 Launch the embedded trajectory segment annotator with:
 
 ```bash

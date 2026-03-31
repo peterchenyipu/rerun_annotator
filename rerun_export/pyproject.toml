@@ -1,0 +1,29 @@
+[project]
+name = "rerun_export"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  # All versions are pinned by the root pyproject.toml
+  "numpy",
+  "pandas",
+  "rerun-sdk==0.29.2",
+  "scipy",
+  "tqdm",
+  "lerobot==0.5.1",
+  "datafusion==50.1.0",
+  "pyarrow",
+  "pillow",
+  "av",
+  "typing-extensions>=4.0",
+]
+
+[project.scripts]
+rerun_export = "rerun_export.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+lerobot = { path = "../lerobot", editable = true }
