@@ -58,6 +58,22 @@ class LeRobotSourceTests(unittest.TestCase):
             finally:
                 cleanup_temp_rrd(materialized)
 
+    def test_materialize_lerobot_episode_with_video_stream_backend_creates_rrd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = self._create_fake_lerobot_dataset(Path(tmpdir))
+            source = resolve_source(dataset_path)
+            self.assertIsInstance(source, LeRobotDatasetSource)
+
+            materialized = materialize_lerobot_episode(source, 1, video_backend="video_stream")
+            try:
+                self.assertTrue(materialized.exists())
+                loaded = recording.load_recording(materialized)
+                schema = str(loaded.schema())
+
+                self.assertIn("/observation.images.top_image:VideoStream:sample", schema)
+            finally:
+                cleanup_temp_rrd(materialized)
+
     def test_update_lerobot_annotation_manifest_replaces_existing_episode_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = self._create_fake_lerobot_dataset(Path(tmpdir))

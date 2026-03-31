@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+import av
 import cv2
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -66,6 +67,8 @@ class LeRobotDatasetSource:
 
 
 ResolvedSource = NativeRrdSource | LeRobotDatasetSource
+LeRobotVideoBackend = Literal["asset_video", "video_stream"]
+DEFAULT_LEROBOT_VIDEO_BACKEND: LeRobotVideoBackend = "asset_video"
 
 
 def resolve_source(source_path: Path) -> ResolvedSource:
@@ -161,6 +164,7 @@ def materialize_lerobot_episode(
     source: LeRobotDatasetSource,
     episode_index: int,
     previous_materialized: str | Path | None = None,
+    video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BACKEND,
 ) -> Path:
     episode = get_episode_record(source, episode_index)
     table = pq.read_table(source.data_file, filters=[("episode_index", "=", episode_index)])
@@ -198,7 +202,7 @@ def materialize_lerobot_episode(
                 continue
 
             if dtype == "video":
-                _log_video_feature(rec, source, feature_key, episode, row_lookup)
+                _log_video_feature(rec, source, feature_key, episode, row_lookup, video_backend=video_backend)
                 continue
 
             if dtype in {"float32", "float64"} and feature_key in table.column_names:
@@ -377,8 +381,22 @@ def _log_video_feature(
     feature_key: str,
     episode: EpisodeRecord,
     row_lookup: dict[int, int],
+    *,
+    video_backend: LeRobotVideoBackend,
 ) -> None:
     feature = source.info.get("features", {}).get(feature_key, {})
+    video_stream_issue = _get_video_stream_support_issue(
+        feature_key=feature_key,
+        shards=source.video_shards.get(feature_key, []),
+    )
+    can_use_video_stream = video_backend == "video_stream" and video_stream_issue is None
+
+    if video_backend == "video_stream" and video_stream_issue is not None:
+        raise ValueError(video_stream_issue)
+
+    if can_use_video_stream:
+        rec.log(feature_key, rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
+
     output_fps = _resolve_video_output_fps(feature, source.video_shards.get(feature_key, []))
     for shard_index, shard in enumerate(source.video_shards.get(feature_key, [])):
         overlap_start = max(shard.global_index_start, episode.global_index_start)
@@ -388,6 +406,25 @@ def _log_video_feature(
 
         local_start = overlap_start - shard.global_index_start
         local_end = overlap_end - shard.global_index_start
+        if can_use_video_stream:
+            packet_count = _log_video_stream_frames(
+                rec,
+                video_path=shard.path,
+                entity_path=feature_key,
+                local_start=local_start,
+                local_end=local_end,
+                overlap_start=overlap_start,
+                row_lookup=row_lookup,
+                output_fps=output_fps,
+            )
+            expected_frames = overlap_end - overlap_start + 1
+            if packet_count != expected_frames:
+                raise ValueError(
+                    f"Video stream packet count mismatch for `{feature_key}`: "
+                    f"expected {expected_frames}, got {packet_count}."
+                )
+            continue
+
         clip_path = _create_temp_video_clip(shard.path, local_start, local_end, output_fps=output_fps)
         try:
             asset = rr.AssetVideo(contents=clip_path.read_bytes(), media_type="video/mp4")
@@ -503,7 +540,7 @@ def _probe_video_stream(video_path: Path) -> dict[str, Any] | None:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=codec_name,width,height,avg_frame_rate,nb_frames,pix_fmt",
+        "stream=codec_name,width,height,avg_frame_rate,nb_frames,pix_fmt,has_b_frames",
         "-of",
         "json",
         str(video_path),
@@ -517,6 +554,62 @@ def _probe_video_stream(video_path: Path) -> dict[str, Any] | None:
     if not streams:
         return None
     return streams[0]
+
+
+def _get_video_stream_support_issue(
+    *,
+    feature_key: str,
+    shards: list[VideoShard],
+) -> str | None:
+    if not shards:
+        return f"VideoStream mode is not supported for `{feature_key}` because no video shards were found."
+
+    probe = _probe_video_stream(shards[0].path)
+    if probe is None:
+        return f"VideoStream mode is not supported for `{feature_key}` because ffprobe metadata is unavailable."
+
+    try:
+        has_b_frames = int(probe.get("has_b_frames", 0))
+    except (TypeError, ValueError):
+        return f"VideoStream mode is not supported for `{feature_key}` because the stream reorder metadata is invalid."
+
+    if has_b_frames != 0:
+        return (
+            f"VideoStream mode is not supported for `{feature_key}` because the stream uses B-frames, "
+            "which Rerun does not currently support for VideoStream."
+        )
+
+    try:
+        container = av.open(str(shards[0].path))
+        stream = container.streams.video[0]
+        next(container.decode(stream))
+    except Exception:
+        return (
+            f"VideoStream mode is not supported for `{feature_key}` because the shard could not be decoded with PyAV."
+        )
+    finally:
+        try:
+            if "container" in locals():
+                container.close()
+        except Exception:
+            pass
+
+    try:
+        codec = av.CodecContext.create("libx264", "w")
+        codec.width = 16
+        codec.height = 16
+        codec.pix_fmt = "yuv420p"
+        codec.time_base = Fraction(1, 50)
+        codec.framerate = Fraction(50, 1)
+        codec.options = _video_stream_encoder_options()
+        codec.open()
+    except Exception:
+        return (
+            f"VideoStream mode is not supported for `{feature_key}` because a libx264 encoder is not available "
+            "through PyAV/FFmpeg in this environment."
+        )
+
+    return None
 
 
 def _resolve_video_output_fps(feature: Any, shards: list[VideoShard]) -> float | None:
@@ -556,6 +649,72 @@ def _parse_frame_rate(value: Any) -> float | None:
     if fps <= 0:
         return None
     return fps
+
+
+def _video_stream_encoder_options() -> dict[str, str]:
+    return {
+        "preset": "veryfast",
+        "tune": "zerolatency",
+        "crf": "14",
+        "x264-params": "keyint=1:min-keyint=1:scenecut=0:repeat-headers=1:annexb=1",
+    }
+
+
+def _log_video_stream_frames(
+    rec: rr.RecordingStream,
+    *,
+    video_path: Path,
+    entity_path: str,
+    local_start: int,
+    local_end: int,
+    overlap_start: int,
+    row_lookup: dict[int, int],
+    output_fps: float | None,
+) -> int:
+    container = av.open(str(video_path))
+    try:
+        input_stream = container.streams.video[0]
+        fps = max(1.0, output_fps or float(_parse_frame_rate(input_stream.average_rate) or 30.0))
+        encoder = av.CodecContext.create("libx264", "w")
+        encoder.width = input_stream.codec_context.width
+        encoder.height = input_stream.codec_context.height
+        encoder.pix_fmt = "yuv420p"
+        encoder.time_base = Fraction(1, round(fps))
+        encoder.framerate = Fraction(round(fps), 1)
+        encoder.options = _video_stream_encoder_options()
+        encoder.open()
+
+        frame_index = 0
+        logged_packets = 0
+        for frame in container.decode(input_stream):
+            if frame_index > local_end:
+                break
+
+            if frame_index >= local_start:
+                encoded_frame = frame.reformat(format="yuv420p")
+                encoded_frame.pts = logged_packets
+                packets = encoder.encode(encoded_frame)
+                if len(packets) != 1:
+                    raise ValueError(
+                        f"Expected exactly one encoded packet per frame for `{entity_path}`, got {len(packets)}."
+                    )
+
+                packet = packets[0]
+                global_index = overlap_start + logged_packets
+                rec.reset_time()
+                rec.set_time(LEROBOT_TIMELINE_FRAME, sequence=row_lookup[global_index])
+                rec.log(entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
+                logged_packets += 1
+
+            frame_index += 1
+
+        flush_packets = encoder.encode(None)
+        if flush_packets:
+            raise ValueError(f"Unexpected delayed packets while encoding video stream for `{entity_path}`.")
+
+        return logged_packets
+    finally:
+        container.close()
 
 
 def _create_temp_video_clip(

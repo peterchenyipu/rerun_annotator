@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Sequence
 
@@ -9,7 +11,9 @@ from gradio_rerun import Rerun
 from gradio_rerun.events import TimelineChange, TimeUpdate
 
 from rerun_annotator.lerobot import (
+    DEFAULT_LEROBOT_VIDEO_BACKEND,
     LeRobotDatasetSource,
+    LeRobotVideoBackend,
     NativeRrdSource,
     ResolvedSource,
     build_lerobot_manifest_path,
@@ -236,6 +240,8 @@ def load_episode(
     selected_episode_input: str | None,
     previous_preview_rrd: str | None,
     previous_base_rrd: str | None,
+    *,
+    video_backend: LeRobotVideoBackend,
 ):
     if not isinstance(source, LeRobotDatasetSource):
         raise gr.Error("Load a LeRobot dataset before trying to load an episode.")
@@ -243,7 +249,12 @@ def load_episode(
         raise gr.Error("Choose an episode before loading it.")
 
     selected_episode = int(selected_episode_input)
-    base_rrd = materialize_lerobot_episode(source, selected_episode, previous_base_rrd)
+    base_rrd = materialize_lerobot_episode(
+        source,
+        selected_episode,
+        previous_base_rrd,
+        video_backend=video_backend,
+    )
     preview_rrd = write_preview_rrd(base_rrd, [], previous_preview_rrd)
     warnings: list[str] = []
 
@@ -491,7 +502,7 @@ def save_segments(
     )
 
 
-def build_demo() -> gr.Blocks:
+def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BACKEND) -> gr.Blocks:
     with gr.Blocks(title="Embedded RRD Segment Annotator") as demo:
         source_state = gr.State(None)
         selected_episode_state = gr.State(None)
@@ -640,7 +651,7 @@ def build_demo() -> gr.Blocks:
         )
 
         load_episode_button.click(
-            load_episode,
+            partial(load_episode, video_backend=video_backend),
             inputs=[source_state, episode_selector, preview_rrd_state, base_rrd_state],
             outputs=[
                 viewer,
@@ -785,7 +796,19 @@ def build_demo() -> gr.Blocks:
 
 
 def main() -> None:
-    demo = build_demo()
+    parser = argparse.ArgumentParser(description="Run the Rerun segment annotator.")
+    parser.add_argument(
+        "--lerobot-video-backend",
+        choices=["asset_video", "video_stream"],
+        default=DEFAULT_LEROBOT_VIDEO_BACKEND,
+        help=(
+            "How LeRobot videos are materialized into the viewer. "
+            "`asset_video` is the stable MP4 asset path; `video_stream` tries Rerun VideoStream."
+        ),
+    )
+    args = parser.parse_args()
+
+    demo = build_demo(video_backend=args.lerobot_video_backend)
     allowed_paths = [str(Path.cwd()), tempfile.gettempdir(), "/home/peteop/Desktop"]
     demo.queue().launch(allowed_paths=allowed_paths)
 
