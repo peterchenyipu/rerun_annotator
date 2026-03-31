@@ -530,18 +530,9 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
             load_button = gr.Button("Load Source", variant="primary")
 
         with gr.Row():
-            with gr.Column(scale=5):
-                viewer = Rerun(
-                    streaming=False,
-                    panel_states={
-                        "time": "expanded",
-                        "blueprint": "collapsed",
-                        "selection": "hidden",
-                    },
-                    height=820,
-                )
-            with gr.Column(scale=4):
+            with gr.Column(scale=3):
                 source_summary_md = gr.Markdown("### Source Summary\n_No source loaded yet._")
+            with gr.Column(scale=3):
                 with gr.Group(visible=False) as episode_group:
                     gr.Markdown("### LeRobot Episode")
                     episode_selector = gr.Dropdown(
@@ -551,8 +542,21 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
                         allow_custom_value=False,
                     )
                     load_episode_button = gr.Button("Load Episode")
-
+            with gr.Column(scale=2):
                 cursor_md = gr.Markdown(render_cursor_markdown("", 0.0))
+
+        viewer = Rerun(
+            streaming=False,
+            panel_states={
+                "time": "expanded",
+                "blueprint": "collapsed",
+                "selection": "hidden",
+            },
+            height=720,
+        )
+
+        with gr.Row():
+            with gr.Column(scale=1):
                 status_md = gr.Markdown("### Status\n- Segments: `0`")
                 summary_md = gr.Markdown(build_summary_markdown([], []))
 
@@ -578,6 +582,7 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
                     allow_custom_value=False,
                 )
 
+            with gr.Column(scale=1):
                 with gr.Group():
                     gr.Markdown("### Segment Form")
                     segment_timeline = gr.Textbox(label="Segment Timeline", interactive=False)
