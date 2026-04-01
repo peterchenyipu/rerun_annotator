@@ -6,12 +6,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "gradio==6.5.1",
-    "gradio-rerun==0.29.2",
+    "gradio-rerun==0.31.1",
     "lerobot==0.5.1",
     "opencv-python==4.13.0.92",
     "pyarrow==23.0.1",
     "rerun_export",
-    "rerun-sdk==0.29.2",
+    "rerun-sdk==0.31.1",
 ]
 
 [tool.uv.sources]

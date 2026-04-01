@@ -7,7 +7,7 @@ dependencies = [
   # All versions are pinned by the root pyproject.toml
   "numpy",
   "pandas",
-  "rerun-sdk==0.29.2",
+  "rerun-sdk==0.31.1",
   "scipy",
   "tqdm",
   "lerobot==0.5.1",
