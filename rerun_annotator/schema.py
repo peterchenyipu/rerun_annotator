@@ -267,11 +267,51 @@ def ensure_source_can_be_annotated(source_rrd: Path) -> None:
         raise ValueError("Source file must be an .rrd recording.")
     if not source_rrd.exists():
         raise ValueError(f"RRD file does not exist: {source_rrd}")
-    if source_has_embedded_segment_annotations(source_rrd):
-        raise ValueError(
-            "This recording already contains embedded segment annotations. "
-            "Editing existing annotated recordings is not supported in v1."
-        )
+
+
+def extract_segments_from_rrd(source_rrd: Path) -> list[SegmentAnnotation]:
+    """Read embedded segment annotations from an annotated .rrd file."""
+    source_recording = recording.load_recording(source_rrd)
+    for chunk in source_recording.chunks():
+        if chunk.entity_path != ANNOTATION_SEGMENTS_ENTITY:
+            continue
+        rb = chunk.to_record_batch()
+        segments: list[SegmentAnnotation] = []
+        for i in range(rb.num_rows):
+            segments.append(
+                SegmentAnnotation(
+                    segment_id=rb.column("segment_id")[i].as_py()[0],
+                    subtask=rb.column("subtask")[i].as_py()[0],
+                    outcome=rb.column("outcome")[i].as_py()[0],
+                    timeline=rb.column("timeline")[i].as_py()[0],
+                    start_time=rb.column("start_time")[i].as_py()[0],
+                    end_time=rb.column("end_time")[i].as_py()[0],
+                )
+            )
+        return segments
+    return []
+
+
+def strip_annotations_to_rrd(source_rrd: Path) -> Path:
+    """Create a copy of the recording with all annotation entities removed."""
+    source_recording = recording.load_recording(source_rrd)
+    application_id = source_recording.application_id() or "rerun_segment_annotator"
+    annotation_prefixes = (ANNOTATION_SEGMENTS_ENTITY, ANNOTATION_BOUNDARIES_ENTITY, ANNOTATION_SUMMARY_ENTITY)
+
+    stripped_path = create_materialized_source_path()
+    rec = rr.RecordingStream(application_id=application_id)
+    rec.save(stripped_path)
+
+    clean_chunks = [
+        chunk for chunk in source_recording.chunks()
+        if not any(chunk.entity_path.startswith(p) for p in annotation_prefixes)
+    ]
+    clean_recording = recording.Recording.from_chunks(
+        clean_chunks, application_id, source_recording.recording_id(),
+    )
+    rr.send_recording(clean_recording, recording=rec)
+    rec.flush()
+    return stripped_path
 
 
 def create_materialized_source_path() -> Path:

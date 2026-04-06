@@ -56,3 +56,5 @@ uv run python main.py --blueprint ""
 **Panel control**: Pass `panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}` to the `Rerun(...)` constructor.
 
 **Custom blueprints**: The annotator supports loading external `.rbl` blueprint files via `--blueprint`. The blueprint is re-stamped to match the recording's `application_id` using `rerun rrd route`, then merged into the preview RRD with `rerun rrd merge`. When a custom blueprint is provided, the default programmatic blueprint (`build_annotation_blueprint()` in `schema.py`) is skipped. Saved (final) RRDs always embed the default blueprint for portability.
+
+**Editing annotated RRDs**: Loading an already-annotated `.rrd` file extracts existing segments (`extract_segments_from_rrd` in `schema.py`), strips annotation entities from the source (`strip_annotations_to_rrd`), and pre-populates the segment table for editing. Three save modes are available: **Save (Overwrite)** writes back to the original source path, **Save (Duplicate)** writes to `<source>.annotated.rrd`, and **Save As** writes to a user-specified path.

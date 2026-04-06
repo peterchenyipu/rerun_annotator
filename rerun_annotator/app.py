@@ -31,13 +31,22 @@ from rerun_annotator.schema import (
     build_summary_markdown,
     cleanup_preview_file,
     cleanup_temp_rrd,
+    extract_segments_from_rrd,
     renumber_segments,
     save_annotated_rrd,
     segment_selector_choices,
     segment_table_rows,
+    source_has_embedded_segment_annotations,
+    strip_annotations_to_rrd,
     validate_segments,
     write_preview_rrd,
 )
+
+
+def _save_buttons_update(interactive: bool) -> tuple:
+    """Return gr.update for the three save buttons."""
+    u = gr.update(interactive=interactive)
+    return (u, u, u)
 
 
 def render_cursor_markdown(current_timeline: str, current_time: float) -> str:
@@ -172,34 +181,49 @@ def load_source(
     cleanup_temp_rrd(previous_base_rrd)
 
     if isinstance(source, NativeRrdSource):
-        preview_rrd = write_preview_rrd(source.path, [], None, blueprint_file=Path(blueprint) if blueprint else None)
+        existing_segments: list[SegmentAnnotation] = []
+        base_rrd_path = source.path
+
+        if source_has_embedded_segment_annotations(source.path):
+            existing_segments = extract_segments_from_rrd(source.path)
+            base_rrd_path = strip_annotations_to_rrd(source.path)
+
+        bp_file = Path(blueprint) if blueprint else None
+        preview_rrd = write_preview_rrd(base_rrd_path, existing_segments, None, blueprint_file=bp_file)
+        seg_warnings = validate_segments(existing_segments) if existing_segments else []
+        all_warnings = warnings + seg_warnings
+        message = (
+            f"Loaded annotated recording with {len(existing_segments)} existing segment(s). You can edit them below."
+            if existing_segments
+            else "Loaded recording. Use the viewer cursor to mark the first segment."
+        )
         return (
             str(preview_rrd),
             source,
             None,
-            str(source.path),
+            str(base_rrd_path),
             str(preview_rrd),
-            [],
-            "",
+            existing_segments,
+            existing_segments[0].timeline if existing_segments else "",
             0.0,
-            render_cursor_markdown("", 0.0),
+            render_cursor_markdown(existing_segments[0].timeline if existing_segments else "", 0.0),
             render_source_summary_markdown(source),
             gr.update(visible=False),
             build_episode_update(None),
-            segment_table_rows([]),
-            boundary_table_rows([]),
-            build_summary_markdown([], warnings),
+            segment_table_rows(existing_segments),
+            boundary_table_rows(existing_segments),
+            build_summary_markdown(existing_segments, all_warnings),
             render_status_markdown(
                 source,
                 None,
-                str(source.path),
-                [],
-                warnings,
-                "Loaded recording. Use the viewer cursor to mark the first segment.",
+                str(base_rrd_path),
+                existing_segments,
+                all_warnings,
+                message,
             ),
-            build_selector_update([]),
+            build_selector_update(existing_segments),
             *clear_segment_form(),
-            gr.update(interactive=False),
+            *_save_buttons_update(bool(existing_segments)),
             "",
             "",
         )
@@ -231,7 +255,7 @@ def load_source(
         ),
         build_selector_update([]),
         *clear_segment_form(),
-        gr.update(interactive=False),
+        *_save_buttons_update(False),
         "",
         str(build_lerobot_manifest_path(source.dataset_path)),
     )
@@ -284,7 +308,7 @@ def load_episode(
         ),
         build_selector_update([]),
         *clear_segment_form(),
-        gr.update(interactive=False),
+        *_save_buttons_update(False),
         str(build_lerobot_output_rrd_path(source.dataset_path, selected_episode)),
         str(build_lerobot_manifest_path(source.dataset_path)),
     )
@@ -324,7 +348,7 @@ def refresh_annotation_state(
         ),
         build_selector_update(segments),
         *next_form_values,
-        gr.update(interactive=bool(segments)),
+        *_save_buttons_update(bool(segments)),
     )
 
 
@@ -473,11 +497,12 @@ def delete_segment(
     )
 
 
-def save_segments(
+def _do_save(
     source: ResolvedSource | None,
     selected_episode: int | None,
     base_rrd: str | None,
     segments: Sequence[SegmentAnnotation],
+    output_path: Path | None,
 ) -> tuple[str, str, str]:
     if source is None or not base_rrd:
         raise gr.Error("Load a source recording before saving.")
@@ -486,18 +511,15 @@ def save_segments(
 
     warnings = validate_segments(segments)
     if isinstance(source, NativeRrdSource):
-        output_path = save_annotated_rrd(source.path, segments)
+        result_path = save_annotated_rrd(Path(base_rrd), segments, output_path)
         manifest_path = ""
     else:
         if selected_episode is None:
             raise gr.Error("Load a LeRobot episode before saving annotations.")
-        output_path = save_annotated_rrd(
-            Path(base_rrd),
-            segments,
-            output_path=build_lerobot_output_rrd_path(source.dataset_path, selected_episode),
-        )
+        lerobot_out = output_path or build_lerobot_output_rrd_path(source.dataset_path, selected_episode)
+        result_path = save_annotated_rrd(Path(base_rrd), segments, output_path=lerobot_out)
         manifest_path = str(
-            update_lerobot_annotation_manifest(source, selected_episode, output_path, list(segments))
+            update_lerobot_annotation_manifest(source, selected_episode, result_path, list(segments))
         )
 
     return (
@@ -507,12 +529,59 @@ def save_segments(
             base_rrd,
             segments,
             warnings,
-            f"Saved annotated recording to `{output_path}`.",
+            f"Saved annotated recording to `{result_path}`.",
             manifest_path=manifest_path or None,
         ),
-        str(output_path),
+        str(result_path),
         manifest_path,
     )
+
+
+def save_overwrite(
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
+    segments: Sequence[SegmentAnnotation],
+) -> tuple[str, str, str]:
+    """Save (Overwrite): write to the original source path."""
+    if source is None:
+        raise gr.Error("Load a source recording before saving.")
+    if isinstance(source, NativeRrdSource):
+        return _do_save(source, selected_episode, base_rrd, segments, source.path)
+    return _do_save(source, selected_episode, base_rrd, segments, None)
+
+
+def save_duplicate(
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
+    segments: Sequence[SegmentAnnotation],
+) -> tuple[str, str, str]:
+    """Save (Duplicate): write to source.annotated.rrd (original behavior)."""
+    from rerun_annotator.schema import build_annotated_rrd_path
+
+    if source is None:
+        raise gr.Error("Load a source recording before saving.")
+    if isinstance(source, NativeRrdSource):
+        return _do_save(source, selected_episode, base_rrd, segments, build_annotated_rrd_path(source.path))
+    return _do_save(source, selected_episode, base_rrd, segments, None)
+
+
+def save_as(
+    source: ResolvedSource | None,
+    selected_episode: int | None,
+    base_rrd: str | None,
+    segments: Sequence[SegmentAnnotation],
+    save_as_path_input: str,
+) -> tuple[str, str, str]:
+    """Save As: write to a user-specified path."""
+    if not save_as_path_input.strip():
+        raise gr.Error("Enter a file path in the 'Save As Path' field.")
+    target = Path(save_as_path_input.strip()).expanduser().resolve()
+    if target.suffix.lower() != ".rrd":
+        target = target.with_suffix(".rrd")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return _do_save(source, selected_episode, base_rrd, segments, target)
 
 
 def build_demo(
@@ -626,8 +695,16 @@ def build_demo(
 
                 with gr.Group():
                     gr.Markdown("### Save")
-                    save_button = gr.Button("Save Annotated RRD", interactive=False)
-                    save_path = gr.Textbox(label="Annotated Output", interactive=False)
+                    with gr.Row():
+                        save_overwrite_button = gr.Button("Save (Overwrite)", interactive=False)
+                        save_duplicate_button = gr.Button("Save (Duplicate)", interactive=False)
+                    save_as_path = gr.Textbox(
+                        label="Save As Path",
+                        placeholder="/path/to/output.rrd",
+                        interactive=True,
+                    )
+                    save_as_button = gr.Button("Save As", interactive=False)
+                    save_path = gr.Textbox(label="Last Saved To", interactive=False)
                     manifest_path = gr.Textbox(label="Manifest Output", interactive=False)
 
         viewer.time_update(
@@ -666,7 +743,9 @@ def build_demo(
                 end_time,
                 subtask,
                 outcome,
-                save_button,
+                save_overwrite_button,
+                save_duplicate_button,
+                save_as_button,
                 save_path,
                 manifest_path,
             ],
@@ -694,7 +773,9 @@ def build_demo(
                 end_time,
                 subtask,
                 outcome,
-                save_button,
+                save_overwrite_button,
+                save_duplicate_button,
+                save_as_button,
                 save_path,
                 manifest_path,
             ],
@@ -753,7 +834,9 @@ def build_demo(
                 end_time,
                 subtask,
                 outcome,
-                save_button,
+                save_overwrite_button,
+                save_duplicate_button,
+                save_as_button,
             ],
         )
         update_button.click(
@@ -785,7 +868,9 @@ def build_demo(
                 end_time,
                 subtask,
                 outcome,
-                save_button,
+                save_overwrite_button,
+                save_duplicate_button,
+                save_as_button,
             ],
         )
         delete_button.click(
@@ -805,12 +890,24 @@ def build_demo(
                 end_time,
                 subtask,
                 outcome,
-                save_button,
+                save_overwrite_button,
+                save_duplicate_button,
+                save_as_button,
             ],
         )
-        save_button.click(
-            save_segments,
+        save_overwrite_button.click(
+            save_overwrite,
             inputs=[source_state, selected_episode_state, base_rrd_state, segments_state],
+            outputs=[status_md, save_path, manifest_path],
+        )
+        save_duplicate_button.click(
+            save_duplicate,
+            inputs=[source_state, selected_episode_state, base_rrd_state, segments_state],
+            outputs=[status_md, save_path, manifest_path],
+        )
+        save_as_button.click(
+            save_as,
+            inputs=[source_state, selected_episode_state, base_rrd_state, segments_state, save_as_path],
             outputs=[status_md, save_path, manifest_path],
         )
 
