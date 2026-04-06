@@ -334,17 +334,58 @@ def write_preview_rrd(
     source_rrd: Path,
     segments: Sequence[SegmentAnnotation],
     previous_preview: str | Path | None,
+    *,
+    blueprint_file: Path | None = None,
 ) -> Path:
     preview_path = create_preview_path()
-    _write_annotated_rrd(source_rrd, segments, preview_path)
+    _write_annotated_rrd(
+        source_rrd, segments, preview_path, skip_blueprint=blueprint_file is not None,
+    )
+    if blueprint_file is not None:
+        _merge_blueprint(preview_path, blueprint_file)
     cleanup_preview_file(previous_preview)
     return preview_path
+
+
+def _merge_blueprint(rrd_path: Path, blueprint_path: Path) -> None:
+    """Re-stamp a .rbl blueprint to match the recording's application_id, then merge."""
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+
+    source_recording = recording.load_recording(rrd_path)
+    app_id = source_recording.application_id() or "rerun_segment_annotator"
+
+    rerun_bin = shutil.which("rerun") or str(Path(sys.executable).parent / "rerun")
+
+    # Re-stamp blueprint so its application_id matches the recording
+    restamped = Path(tempfile.mktemp(suffix=".rbl"))
+    try:
+        subprocess.run(
+            [rerun_bin, "rrd", "route", "--application-id", app_id,
+             str(blueprint_path), "-o", str(restamped)],
+            check=True,
+            capture_output=True,
+        )
+        # Merge re-stamped blueprint into the RRD
+        merged = rrd_path.with_suffix(".merged.rrd")
+        subprocess.run(
+            [rerun_bin, "rrd", "merge", str(rrd_path), str(restamped), "-o", str(merged)],
+            check=True,
+            capture_output=True,
+        )
+        merged.replace(rrd_path)
+    finally:
+        restamped.unlink(missing_ok=True)
 
 
 def _write_annotated_rrd(
     source_rrd: Path,
     segments: Sequence[SegmentAnnotation],
     output_path: Path,
+    *,
+    skip_blueprint: bool = False,
 ) -> None:
     warnings = validate_segments(segments)
     source_recording = recording.load_recording(source_rrd)
@@ -358,7 +399,8 @@ def _write_annotated_rrd(
     rr.send_recording(source_recording, recording=rec)
 
     _log_annotation_entities(rec, segments, warnings, source_recording=source_recording)
-    rec.send_blueprint(build_annotation_blueprint())
+    if not skip_blueprint:
+        rec.send_blueprint(build_annotation_blueprint())
     rec.flush()
 
 

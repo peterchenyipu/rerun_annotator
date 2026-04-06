@@ -160,6 +160,8 @@ def load_source(
     source_path_input: str,
     previous_preview_rrd: str | None,
     previous_base_rrd: str | None,
+    *,
+    blueprint: str | None = None,
 ):
     if not source_path_input.strip():
         raise gr.Error("Enter a source path before loading.")
@@ -170,7 +172,7 @@ def load_source(
     cleanup_temp_rrd(previous_base_rrd)
 
     if isinstance(source, NativeRrdSource):
-        preview_rrd = write_preview_rrd(source.path, [], None)
+        preview_rrd = write_preview_rrd(source.path, [], None, blueprint_file=Path(blueprint) if blueprint else None)
         return (
             str(preview_rrd),
             source,
@@ -242,6 +244,7 @@ def load_episode(
     previous_base_rrd: str | None,
     *,
     video_backend: LeRobotVideoBackend,
+    blueprint: str | None = None,
 ):
     if not isinstance(source, LeRobotDatasetSource):
         raise gr.Error("Load a LeRobot dataset before trying to load an episode.")
@@ -255,7 +258,7 @@ def load_episode(
         previous_base_rrd,
         video_backend=video_backend,
     )
-    preview_rrd = write_preview_rrd(base_rrd, [], previous_preview_rrd)
+    preview_rrd = write_preview_rrd(base_rrd, [], previous_preview_rrd, blueprint_file=Path(blueprint) if blueprint else None)
     warnings: list[str] = []
 
     return (
@@ -296,9 +299,10 @@ def refresh_annotation_state(
     message: str,
     *,
     form_values: tuple[str, float | None, float | None, str, str] | None = None,
+    blueprint: str | None = None,
 ):
     warnings = validate_segments(segments)
-    preview_rrd = write_preview_rrd(Path(base_rrd), segments, previous_preview_rrd)
+    preview_rrd = write_preview_rrd(Path(base_rrd), segments, previous_preview_rrd, blueprint_file=Path(blueprint) if blueprint else None)
     next_form_values = clear_segment_form() if form_values is None else form_values
     manifest_path = str(build_lerobot_manifest_path(source.dataset_path)) if isinstance(source, LeRobotDatasetSource) else ""
 
@@ -335,6 +339,8 @@ def add_segment(
     end_time: float | None,
     subtask: str,
     outcome: str,
+    *,
+    blueprint: str | None = None,
 ):
     if source is None or not base_rrd:
         raise gr.Error("Load a source recording before adding segments.")
@@ -356,6 +362,7 @@ def add_segment(
         updated_segments,
         f"Added segment #{updated_segments[-1].segment_id}.",
         form_values=prefill_next_segment_form(updated_segments),
+        blueprint=blueprint,
     )
 
 
@@ -392,6 +399,8 @@ def update_segment(
     end_time: float | None,
     subtask: str,
     outcome: str,
+    *,
+    blueprint: str | None = None,
 ):
     if source is None or not base_rrd:
         raise gr.Error("Load a source recording before updating segments.")
@@ -428,6 +437,7 @@ def update_segment(
         previous_preview_rrd,
         updated_segments,
         f"Updated segment #{selected_id}.",
+        blueprint=blueprint,
     )
 
 
@@ -438,6 +448,8 @@ def delete_segment(
     previous_preview_rrd: str | None,
     selected_segment_id: str | None,
     segments: list[SegmentAnnotation],
+    *,
+    blueprint: str | None = None,
 ):
     if source is None or not base_rrd:
         raise gr.Error("Load a source recording before deleting segments.")
@@ -457,6 +469,7 @@ def delete_segment(
         previous_preview_rrd,
         updated_segments,
         f"Deleted segment #{selected_id}.",
+        blueprint=blueprint,
     )
 
 
@@ -502,7 +515,11 @@ def save_segments(
     )
 
 
-def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BACKEND) -> gr.Blocks:
+def build_demo(
+    *,
+    video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BACKEND,
+    blueprint_path: str | None = None,
+) -> gr.Blocks:
     with gr.Blocks(title="Embedded RRD Segment Annotator") as demo:
         source_state = gr.State(None)
         selected_episode_state = gr.State(None)
@@ -624,7 +641,7 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
         )
 
         load_button.click(
-            load_source,
+            partial(load_source, blueprint=blueprint_path),
             inputs=[source_path_input, preview_rrd_state, base_rrd_state],
             outputs=[
                 viewer,
@@ -656,7 +673,7 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
         )
 
         load_episode_button.click(
-            partial(load_episode, video_backend=video_backend),
+            partial(load_episode, video_backend=video_backend, blueprint=blueprint_path),
             inputs=[source_state, episode_selector, preview_rrd_state, base_rrd_state],
             outputs=[
                 viewer,
@@ -709,7 +726,7 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
         )
 
         add_button.click(
-            add_segment,
+            partial(add_segment, blueprint=blueprint_path),
             inputs=[
                 source_state,
                 selected_episode_state,
@@ -740,7 +757,7 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
             ],
         )
         update_button.click(
-            update_segment,
+            partial(update_segment, blueprint=blueprint_path),
             inputs=[
                 source_state,
                 selected_episode_state,
@@ -772,7 +789,7 @@ def build_demo(*, video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BAC
             ],
         )
         delete_button.click(
-            delete_segment,
+            partial(delete_segment, blueprint=blueprint_path),
             inputs=[source_state, selected_episode_state, base_rrd_state, preview_rrd_state, selector, segments_state],
             outputs=[
                 viewer,
@@ -811,9 +828,21 @@ def main() -> None:
             "`asset_video` is the stable MP4 asset path; `video_stream` tries Rerun VideoStream."
         ),
     )
+    parser.add_argument(
+        "--blueprint",
+        type=str,
+        default="bp.rbl",
+        help="Path to a Rerun blueprint file (.rbl) to apply to the viewer. Set to empty string to disable.",
+    )
     args = parser.parse_args()
 
-    demo = build_demo(video_backend=args.lerobot_video_backend)
+    blueprint = None
+    if args.blueprint:
+        bp = Path(args.blueprint).expanduser().resolve()
+        if bp.exists():
+            blueprint = str(bp)
+
+    demo = build_demo(video_backend=args.lerobot_video_backend, blueprint_path=blueprint)
     allowed_paths = [str(Path.cwd()), tempfile.gettempdir(), "/home/peteop/Desktop"]
     demo.queue().launch(allowed_paths=allowed_paths)
 

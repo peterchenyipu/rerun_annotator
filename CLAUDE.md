@@ -16,7 +16,20 @@ uv sync
 
 # Run the main app
 uv run python main.py
+
+# Run with a custom blueprint
+uv run python main.py --blueprint my_layout.rbl
+
+# Disable blueprint (use default auto-generated layout)
+uv run python main.py --blueprint ""
 ```
+
+### CLI arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--lerobot-video-backend` | `asset_video` | How LeRobot videos are materialized (`asset_video` or `video_stream`) |
+| `--blueprint` | `bp.rbl` | Path to a Rerun `.rbl` blueprint file. Empty string disables. |
 
 ## Architecture
 
@@ -41,3 +54,5 @@ uv run python main.py
 **Events from viewer**: Wire `viewer.selection_change`, `viewer.time_update`, `viewer.timeline_change` to callbacks. Event payloads are typed objects accessed via `evt.payload`.
 
 **Panel control**: Pass `panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}` to the `Rerun(...)` constructor.
+
+**Custom blueprints**: The annotator supports loading external `.rbl` blueprint files via `--blueprint`. The blueprint is re-stamped to match the recording's `application_id` using `rerun rrd route`, then merged into the preview RRD with `rerun rrd merge`. When a custom blueprint is provided, the default programmatic blueprint (`build_annotation_blueprint()` in `schema.py`) is skipped. Saved (final) RRDs always embed the default blueprint for portability.
