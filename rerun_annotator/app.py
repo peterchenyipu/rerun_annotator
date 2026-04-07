@@ -8,7 +8,7 @@ from typing import Sequence
 
 import gradio as gr
 from gradio_rerun import Rerun
-from gradio_rerun.events import TimelineChange, TimeUpdate
+from gradio_rerun.events import TimeSelectionChange, TimelineChange, TimeUpdate
 
 from rerun_annotator.lerobot import (
     DEFAULT_LEROBOT_VIDEO_BACKEND,
@@ -599,6 +599,15 @@ def save_as(
     return _do_save(source, selected_episode, base_rrd, segments, target)
 
 
+def handle_time_selection_change(
+    current_timeline: str,
+    evt: TimeSelectionChange,
+) -> tuple[str, float | None, float | None]:
+    """Auto-populate trim start/end from the viewer's loop selection (blue region)."""
+    timeline = current_timeline or ""
+    return timeline, evt.payload.min, evt.payload.max
+
+
 def set_trim_start_from_cursor(
     current_timeline: str,
     current_time: float,
@@ -887,6 +896,11 @@ def build_demo(
         viewer.timeline_change(
             track_current_timeline_and_time,
             outputs=[current_timeline_state, current_time_state, cursor_md],
+        )
+        viewer.time_selection_change(
+            handle_time_selection_change,
+            inputs=[current_timeline_state],
+            outputs=[trim_timeline, trim_start, trim_end],
         )
 
         load_button.click(
