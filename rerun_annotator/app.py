@@ -26,18 +26,21 @@ from rerun_annotator.lerobot import (
 )
 from rerun_annotator.schema import (
     SegmentAnnotation,
+    TrimRegion,
     boundary_table_rows,
     build_segment_annotation,
     build_summary_markdown,
     cleanup_preview_file,
     cleanup_temp_rrd,
     extract_segments_from_rrd,
+    filter_segments_after_trim,
     renumber_segments,
     save_annotated_rrd,
     segment_selector_choices,
     segment_table_rows,
     source_has_embedded_segment_annotations,
     strip_annotations_to_rrd,
+    trim_rrd,
     validate_segments,
     write_preview_rrd,
 )
@@ -226,6 +229,10 @@ def load_source(
             *_save_buttons_update(bool(existing_segments)),
             "",
             "",
+            # Reset trim states
+            None,                                       # pre_trim_base_rrd_state
+            [],                                         # pre_trim_segments_state
+            gr.update(interactive=False),                # trim_undo_button
         )
 
     return (
@@ -258,6 +265,10 @@ def load_source(
         *_save_buttons_update(False),
         "",
         str(build_lerobot_manifest_path(source.dataset_path)),
+        # Reset trim states
+        None,                                           # pre_trim_base_rrd_state
+        [],                                             # pre_trim_segments_state
+        gr.update(interactive=False),                    # trim_undo_button
     )
 
 
@@ -311,6 +322,10 @@ def load_episode(
         *_save_buttons_update(False),
         str(build_lerobot_output_rrd_path(source.dataset_path, selected_episode)),
         str(build_lerobot_manifest_path(source.dataset_path)),
+        # Reset trim states
+        None,                                           # pre_trim_base_rrd_state
+        [],                                             # pre_trim_segments_state
+        gr.update(interactive=False),                    # trim_undo_button
     )
 
 
@@ -584,6 +599,133 @@ def save_as(
     return _do_save(source, selected_episode, base_rrd, segments, target)
 
 
+def set_trim_start_from_cursor(
+    current_timeline: str,
+    current_time: float,
+) -> tuple[str, float]:
+    if not current_timeline:
+        raise gr.Error("Select a timeline in the viewer first.")
+    return current_timeline, float(current_time)
+
+
+def set_trim_end_from_cursor(
+    current_timeline: str,
+    current_time: float,
+) -> tuple[str, float]:
+    if not current_timeline:
+        raise gr.Error("Select a timeline in the viewer first.")
+    return current_timeline, float(current_time)
+
+
+
+def execute_trim(
+    source: ResolvedSource | None,
+    base_rrd: str | None,
+    previous_preview_rrd: str | None,
+    segments: list[SegmentAnnotation],
+    trim_start: float | None,
+    trim_end: float | None,
+    trim_timeline: str,
+    trim_mode: str,
+    trim_confirmed: bool,
+    *,
+    blueprint: str | None = None,
+):
+    if source is None or not base_rrd:
+        raise gr.Error("Load a source recording before trimming.")
+    if trim_start is None or trim_end is None:
+        raise gr.Error("Set both start and end times for the trim range.")
+    if trim_start >= trim_end:
+        raise gr.Error("Start must be less than end.")
+    if not trim_timeline.strip():
+        raise gr.Error("Set the trim timeline from the viewer cursor.")
+    if not trim_confirmed:
+        raise gr.Error("Check the confirmation box before executing trim.")
+
+    mode = "keep" if trim_mode == "keep" else "remove"
+    region = TrimRegion(float(trim_start), float(trim_end))
+    regions = [region]
+    trimmed_path = trim_rrd(Path(base_rrd), trim_timeline, regions, mode)
+
+    # Preserve annotations that survive the trim
+    kept_segments = filter_segments_after_trim(segments, regions, mode)
+    warnings = validate_segments(kept_segments) if kept_segments else []
+
+    bp_file = Path(blueprint) if blueprint else None
+    preview_rrd = write_preview_rrd(trimmed_path, kept_segments, previous_preview_rrd, blueprint_file=bp_file)
+
+    dropped = len(segments) - len(kept_segments)
+    msg = f"Trimmed ({mode} [{region.start_time:.1f}, {region.end_time:.1f}])."
+    if dropped:
+        msg += f" {dropped} segment(s) removed."
+    msg += f" Kept {len(kept_segments)} segment(s). Undo available."
+
+    return (
+        str(preview_rrd),                           # viewer
+        str(trimmed_path),                          # base_rrd_state
+        str(preview_rrd),                           # preview_rrd_state
+        base_rrd,                                   # pre_trim_base_rrd_state (old base for undo)
+        list(segments),                             # pre_trim_segments_state (old segments for undo)
+        kept_segments,                              # segments_state
+        segment_table_rows(kept_segments),           # segment_table
+        boundary_table_rows(kept_segments),          # boundary_table
+        build_summary_markdown(kept_segments, warnings),  # summary_md
+        render_status_markdown(
+            source, None, str(trimmed_path), kept_segments, warnings, msg,
+        ),
+        build_selector_update(kept_segments),        # selector
+        *clear_segment_form(),                       # form fields
+        *_save_buttons_update(bool(kept_segments)),  # save buttons
+        gr.update(interactive=True),                 # trim_undo_button
+        False,                                      # trim_confirmed checkbox
+    )
+
+
+def undo_trim(
+    source: ResolvedSource | None,
+    pre_trim_base_rrd: str | None,
+    pre_trim_segments: list[SegmentAnnotation],
+    previous_preview_rrd: str | None,
+    current_base_rrd: str | None,
+    *,
+    blueprint: str | None = None,
+):
+    if not pre_trim_base_rrd:
+        raise gr.Error("No trim to undo.")
+
+    # Clean up the trimmed file
+    cleanup_temp_rrd(current_base_rrd)
+
+    restored_segments = pre_trim_segments or []
+    warnings = validate_segments(restored_segments) if restored_segments else []
+
+    bp_file = Path(blueprint) if blueprint else None
+    preview_rrd = write_preview_rrd(
+        Path(pre_trim_base_rrd), restored_segments, previous_preview_rrd,
+        blueprint_file=bp_file,
+    )
+
+    return (
+        str(preview_rrd),                           # viewer
+        pre_trim_base_rrd,                          # base_rrd_state (restored)
+        str(preview_rrd),                           # preview_rrd_state
+        None,                                       # pre_trim_base_rrd_state (cleared)
+        [],                                         # pre_trim_segments_state (cleared)
+        restored_segments,                          # segments_state (restored)
+        segment_table_rows(restored_segments),       # segment_table
+        boundary_table_rows(restored_segments),      # boundary_table
+        build_summary_markdown(restored_segments, warnings),  # summary_md
+        render_status_markdown(
+            source, None, pre_trim_base_rrd, restored_segments, warnings,
+            "Trim undone. Recording and annotations restored.",
+        ),
+        build_selector_update(restored_segments),    # selector
+        *clear_segment_form(),                       # form fields
+        *_save_buttons_update(bool(restored_segments)),  # save buttons
+        gr.update(interactive=False),                # trim_undo_button
+    )
+
+
 def build_demo(
     *,
     video_backend: LeRobotVideoBackend = DEFAULT_LEROBOT_VIDEO_BACKEND,
@@ -597,6 +739,8 @@ def build_demo(
         segments_state = gr.State([])
         current_timeline_state = gr.State("")
         current_time_state = gr.State(0.0)
+        pre_trim_base_rrd_state = gr.State(None, delete_callback=cleanup_temp_rrd)
+        pre_trim_segments_state = gr.State([])
 
         gr.Markdown(
             """
@@ -640,6 +784,34 @@ def build_demo(
             },
             height=720,
         )
+
+        with gr.Accordion("Trim Recording", open=False):
+            gr.Markdown(
+                "_Trim the recording by selecting a time range to **keep** or **remove**. "
+                "Annotations that fall outside the kept range are discarded._"
+            )
+            with gr.Row():
+                trim_mode = gr.Radio(
+                    choices=["keep", "remove"],
+                    value="keep",
+                    label="Mode",
+                    info="Keep: discard everything outside the range. Remove: cut the range out.",
+                )
+                trim_timeline = gr.Textbox(
+                    label="Trim Timeline",
+                    interactive=False,
+                    info="Auto-set from viewer cursor",
+                )
+            with gr.Row():
+                trim_start = gr.Number(label="Start", precision=6)
+                trim_end = gr.Number(label="End", precision=6)
+            with gr.Row():
+                trim_set_start_button = gr.Button("Set Start From Cursor")
+                trim_set_end_button = gr.Button("Set End From Cursor")
+            trim_confirmed = gr.Checkbox(label="I confirm I want to trim this recording", value=False)
+            with gr.Row():
+                trim_execute_button = gr.Button("Execute Trim", variant="stop")
+                trim_undo_button = gr.Button("Undo Trim", interactive=False)
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -748,6 +920,9 @@ def build_demo(
                 save_as_button,
                 save_path,
                 manifest_path,
+                pre_trim_base_rrd_state,
+                pre_trim_segments_state,
+                trim_undo_button,
             ],
         )
 
@@ -778,6 +953,9 @@ def build_demo(
                 save_as_button,
                 save_path,
                 manifest_path,
+                pre_trim_base_rrd_state,
+                pre_trim_segments_state,
+                trim_undo_button,
             ],
         )
 
@@ -909,6 +1087,87 @@ def build_demo(
             save_as,
             inputs=[source_state, selected_episode_state, base_rrd_state, segments_state, save_as_path],
             outputs=[status_md, save_path, manifest_path],
+        )
+
+        # --- Trim controls ---
+        trim_set_start_button.click(
+            set_trim_start_from_cursor,
+            inputs=[current_timeline_state, current_time_state],
+            outputs=[trim_timeline, trim_start],
+        )
+        trim_set_end_button.click(
+            set_trim_end_from_cursor,
+            inputs=[current_timeline_state, current_time_state],
+            outputs=[trim_timeline, trim_end],
+        )
+        trim_execute_button.click(
+            partial(execute_trim, blueprint=blueprint_path),
+            inputs=[
+                source_state,
+                base_rrd_state,
+                preview_rrd_state,
+                segments_state,
+                trim_start,
+                trim_end,
+                trim_timeline,
+                trim_mode,
+                trim_confirmed,
+            ],
+            outputs=[
+                viewer,
+                base_rrd_state,
+                preview_rrd_state,
+                pre_trim_base_rrd_state,
+                pre_trim_segments_state,
+                segments_state,
+                segment_table,
+                boundary_table,
+                summary_md,
+                status_md,
+                selector,
+                segment_timeline,
+                start_time,
+                end_time,
+                subtask,
+                outcome,
+                save_overwrite_button,
+                save_duplicate_button,
+                save_as_button,
+                trim_undo_button,
+                trim_confirmed,
+            ],
+        )
+        trim_undo_button.click(
+            partial(undo_trim, blueprint=blueprint_path),
+            inputs=[
+                source_state,
+                pre_trim_base_rrd_state,
+                pre_trim_segments_state,
+                preview_rrd_state,
+                base_rrd_state,
+            ],
+            outputs=[
+                viewer,
+                base_rrd_state,
+                preview_rrd_state,
+                pre_trim_base_rrd_state,
+                pre_trim_segments_state,
+                segments_state,
+                segment_table,
+                boundary_table,
+                summary_md,
+                status_md,
+                selector,
+                segment_timeline,
+                start_time,
+                end_time,
+                subtask,
+                outcome,
+                save_overwrite_button,
+                save_duplicate_button,
+                save_as_button,
+                trim_undo_button,
+            ],
         )
 
     return demo
